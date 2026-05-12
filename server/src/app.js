@@ -1,0 +1,47 @@
+import compression from "compression";
+import cors from "cors";
+import express from "express";
+import helmet from "helmet";
+import { env } from "./config/env.js";
+import { csrfProtection } from "./middleware/csrf.js";
+import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
+import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requestLogger } from "./middleware/requestLogger.js";
+import { sanitizeInput } from "./middleware/sanitize.js";
+import routes from "./routes/index.js";
+
+export const app = express();
+const allowedOrigins = new Set([
+  env.clientUrl,
+  "http://localhost:5173",
+  "http://127.0.0.1:5173"
+]);
+
+app.set("trust proxy", 1);
+app.use(helmet());
+app.use(compression());
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("Origin is not allowed by CORS"));
+  },
+  credentials: true
+}));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(sanitizeInput);
+app.use(requestLogger);
+app.use(apiRateLimiter);
+app.use(csrfProtection);
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "legal-field-consultancy-api",
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.use("/api", routes);
+app.use(notFoundHandler);
+app.use(errorHandler);

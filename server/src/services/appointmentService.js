@@ -1,0 +1,181 @@
+import { prisma } from "../config/prisma.js";
+import { classifyPriority, detectSchedulingConflicts } from "./conflictService.js";
+import { createNotification, notifyAppointmentChange, simulateEmail } from "./notificationService.js";
+import { writeAuditLog } from "./auditService.js";
+
+const appointmentInclude = {
+  client: { select: { id: true, name: true, email: true, phone: true } },
+  lawyer: { include: { user: { select: { id: true, name: true, email: true } } } },
+  documents: true,
+  history: { orderBy: { createdAt: "desc" }, take: 10 }
+};
+
+export async function createAppointment({ data, actor, req }) {
+  const suggestedPriority = classifyPriority(data);
+  const priority = data.priority || suggestedPriority;
+  const preferredStart = new Date(data.preferredStart);
+  const preferredEnd = new Date(data.preferredEnd);
+  const conflictScan = await detectSchedulingConflicts({
+    lawyerId: data.lawyerId,
+    start: preferredStart,
+    end: preferredEnd,
+    clientId: actor.role.slug === "client" ? actor.id : data.clientId || actor.id,
+    consultationType: data.consultationType
+  });
+
+  const appointment = await prisma.appointment.create({
+    data: {
+      clientId: actor.role.slug === "client" ? actor.id : data.clientId || actor.id,
+      lawyerId: data.lawyerId || null,
+      consultationType: data.consultationType,
+      subject: data.subject,
+      description: data.description,
+      priority,
+      requestedPriority: data.priority || null,
+      priorityReason: `Rule suggestion: ${suggestedPriority}. Selected priority: ${priority}.`,
+      preferredStart,
+      preferredEnd,
+      scheduledStart: data.lawyerId && conflictScan.status !== "CONFLICT" ? preferredStart : null,
+      scheduledEnd: data.lawyerId && conflictScan.status !== "CONFLICT" ? preferredEnd : null,
+      locationMode: data.locationMode || "IN_PERSON",
+      conflictStatus: conflictScan.status,
+      history: {
+        create: [
+          {
+            actorId: actor.id,
+            action: "INQUIRY_CREATED",
+            note: `Priority classified as ${priority}. Conflict status: ${conflictScan.status}.`,
+            metadata: { suggestedPriority, selectedPriority: priority, conflictScan }
+          }
+        ]
+      }
+    },
+    include: appointmentInclude
+  });
+
+  await Promise.all([
+    createNotification({
+      userId: appointment.clientId,
+      title: "Appointment inquiry received",
+      message: "Your consultation request has been submitted for review.",
+      type: "APPOINTMENT",
+      actionUrl: `/appointments?id=${appointment.id}`,
+      metadata: { appointmentId: appointment.id }
+    }),
+    simulateEmail({
+      to: appointment.client.email,
+      subject: "Appointment inquiry received",
+      body: `Your reference number is ${appointment.id}.`
+    }),
+    writeAuditLog({ req, userId: actor.id, action: "CREATE_APPOINTMENT", entity: "Appointment", entityId: appointment.id, metadata: { priority, suggestedPriority, conflictScan } })
+  ]);
+
+  return appointment;
+}
+
+export async function updateAppointmentStatus({ id, data, actor, req }) {
+  const existing = await prisma.appointment.findUnique({
+    where: { id },
+    include: appointmentInclude
+  });
+
+  if (!existing) {
+    const error = new Error("Appointment not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const scheduledStart = data.scheduledStart ? new Date(data.scheduledStart) : existing.scheduledStart;
+  const scheduledEnd = data.scheduledEnd ? new Date(data.scheduledEnd) : existing.scheduledEnd;
+  const lawyerId = data.lawyerId || existing.lawyerId;
+  const conflictScan = await detectSchedulingConflicts({
+    lawyerId,
+    start: scheduledStart || existing.preferredStart,
+    end: scheduledEnd || existing.preferredEnd,
+    appointmentId: id,
+    clientId: existing.clientId,
+    consultationType: existing.consultationType
+  });
+
+  const appointment = await prisma.appointment.update({
+    where: { id },
+    data: {
+      status: data.status,
+      lawyerId,
+      assignedById: actor.id,
+      scheduledStart,
+      scheduledEnd,
+      conflictStatus: conflictScan.status,
+      cancellationReason: data.status === "CANCELLED" ? data.reason : existing.cancellationReason,
+      history: {
+        create: {
+          actorId: actor.id,
+          action: `STATUS_${data.status}`,
+          note: data.reason || `Appointment moved to ${data.status}.`,
+          metadata: conflictScan
+        }
+      }
+    },
+    include: appointmentInclude
+  });
+
+  await Promise.all([
+    notifyAppointmentChange({
+      appointment,
+      actor,
+      title: "Appointment status updated",
+      message: `${appointment.subject} is now ${appointment.status}.`
+    }),
+    writeAuditLog({ req, userId: actor.id, action: "UPDATE_APPOINTMENT_STATUS", entity: "Appointment", entityId: id, metadata: { status: data.status, conflictScan } })
+  ]);
+
+  return appointment;
+}
+
+export async function rescheduleAppointment({ id, data, actor, req }) {
+  const preferredStart = new Date(data.preferredStart);
+  const preferredEnd = new Date(data.preferredEnd);
+  const appointment = await prisma.appointment.update({
+    where: { id },
+    data: {
+      preferredStart,
+      preferredEnd,
+      status: "RESCHEDULE_REQUESTED",
+      rescheduleReason: data.reason,
+      history: {
+        create: {
+          actorId: actor.id,
+          action: "RESCHEDULE_REQUESTED",
+          note: data.reason || "Client requested a new schedule."
+        }
+      }
+    },
+    include: appointmentInclude
+  });
+
+  await writeAuditLog({ req, userId: actor.id, action: "RESCHEDULE_APPOINTMENT", entity: "Appointment", entityId: id });
+  return appointment;
+}
+
+export async function cancelAppointment({ id, reason, actor, req }) {
+  const appointment = await prisma.appointment.update({
+    where: { id },
+    data: {
+      status: "CANCELLED",
+      cancellationReason: reason,
+      history: {
+        create: {
+          actorId: actor.id,
+          action: "CANCELLED",
+          note: reason || "Appointment cancelled."
+        }
+      }
+    },
+    include: appointmentInclude
+  });
+
+  await writeAuditLog({ req, userId: actor.id, action: "CANCEL_APPOINTMENT", entity: "Appointment", entityId: id });
+  return appointment;
+}
+
+export { appointmentInclude };
