@@ -9,7 +9,7 @@ import "./styles/index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename="/LFC-LAWFIRM-demo/">
       <ErrorBoundary>
         <AuthProvider>
           <App />

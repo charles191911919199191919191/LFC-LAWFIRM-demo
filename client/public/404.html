@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Legal and Field Consultancy Firms scheduling platform for legal consultations, lawyer availability, and conflict monitoring."
+    />
+    <link rel="icon" type="image/svg+xml" href="/LFC-LAWFIRM-demo/favicon.svg" />
+    <title>Legal and Field Consultancy Firms</title>
+    <script>
+      // Handle GitHub Pages SPA routing
+      // Redirect 404s to the root index.html with the path as a query parameter
+      var l = window.location;
+      if (l.pathname.split('/').filter(Boolean).slice(-1)[0] !== 'index.html' && l.pathname !== '/') {
+        l.replace(
+          l.protocol + '//' + l.host + '/LFC-LAWFIRM-demo/?redirect=' +
+          l.pathname.slice(1).replace(/&/g, '~and~') + (l.search.slice(1).length > 0 ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+          l.hash
+        );
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
